@@ -1,30 +1,90 @@
 #!/bin/bash
-
 #
-# Test 1: graceful shutdown during sleepy request
+# This script checks graceful shutdown behavior of different gunicorn
+# workers when a SIGQUIT is received while several kinds of lengthy
+# requests are outstanding, namely:
+#
+#       sleep       Worker is executing time.sleep()
+#       work        Worker is CPU-bound
+#       req         Worker is I/O bound (waiting for HTTP response)
 #
 
 Red="[0;31m"
 Green="[0;32m"
 Reset="[0;37m"
 
-# Start gunicorn in the background
-gunicorn app:app -p gunicorn.pid -k eventlet -b 0.0.0.0:5000 -w 3 &
-sleep 2
+result_workers=()
+result_types=()
+result_results=()
 
-# Send it SIGQUIT in 3 seconds
-(sleep 3 && echo Sending SIGQUIT... && kill -QUIT `cat gunicorn.pid`) &
+function testcase # seq worker type
+{
+    SEQ=$1
+    WORKER=$2
+    TYPE=$3
 
-# Make a request
-echo Starting request...
-result=$(curl -sS localhost:5000/sleep/1?time=10 2>&1)
-wait `cat gunicorn.pid`
+    result_workers+=($WORKER)
+    result_types+=($TYPE)
 
-if [ "$result" != "1" ]; then
-    echo [${Red}TEST FAILED${Reset}]
-    echo "    Expected response: 1"
-    echo "    Actual response: $result"
-else
-    echo [${Green}TEST OK${Reset}]
-fi
+    echo -----------------------------------------------------------------
+    echo TEST CASE: worker=$WORKER, task=$TYPE
+    echo -----------------------------------------------------------------
 
+    # Start gunicorn in the background
+    gunicorn app:app -p gunicorn.pid -k $WORKER -b 0.0.0.0:5000 -w 3 &
+    sleep 1
+
+    # Send it SIGQUIT in 2 seconds
+    (sleep 2 && echo Sending SIGQUIT... && kill -QUIT `cat gunicorn.pid`) &
+
+    # Initiate a lengthy request
+    echo Starting request...
+    result=$(curl -sS localhost:5000/$TYPE/$SEQ?time=5 2>&1)
+    wait `cat gunicorn.pid`
+
+    # Check whether it completed or was interrupted by non-graceful shutdown
+    if [ "$result" != "$SEQ" ]; then
+        echo [${Red}TEST FAILED${Reset}]
+        echo "    Expected response: $SEQ"
+        echo "    Actual response: $result"
+        result_results+=("${Red}FAIL${Reset}")
+    else
+        echo [${Green}TEST OK${Reset}]
+        result_results+=("${Green}  OK${Reset}")
+    fi
+}
+
+function testsummary
+{
+    echo
+    echo TEST SUMMARY
+    echo -----------------------------------------------------------------
+    printf "%-20s %-20s %+23s\n" "Worker type" "Task" "Graceful shutdown"
+    echo -----------------------------------------------------------------
+
+    for index in ${!result_results[@]}
+    do
+        printf \
+            "%-20s %-39s %-20s\n" \
+            "${result_workers[$index]}" \
+            "${result_types[$index]}" \
+            "${result_results[$index]}"
+    done
+}
+
+# Start a separate instance on port 6000 for external requests
+gunicorn app:app -D --log-level ERROR -p service.pid -b 0.0.0.0:6000 &
+
+# Run tests
+testcase 1 eventlet sleep
+testcase 2 eventlet work
+testcase 3 eventlet req
+
+testcase 4 gevent sleep
+testcase 5 gevent work
+testcase 6 gevent req
+
+testsummary
+
+# Kill the service instance
+kill `cat service.pid`
