@@ -1,0 +1,30 @@
+#!/bin/bash
+
+#
+# Test 1: graceful shutdown during sleepy request
+#
+
+Red="[0;31m"
+Green="[0;32m"
+Reset="[0;37m"
+
+# Start gunicorn in the background
+gunicorn app:app -p gunicorn.pid -k eventlet -b 0.0.0.0:5000 -w 3 &
+sleep 2
+
+# Send it SIGQUIT in 3 seconds
+(sleep 3 && echo Sending SIGQUIT... && kill -QUIT `cat gunicorn.pid`) &
+
+# Make a request
+echo Starting request...
+result=$(curl -sS localhost:5000/sleep/1?time=10 2>&1)
+wait `cat gunicorn.pid`
+
+if [ "$result" != "1" ]; then
+    echo [${Red}TEST FAILED${Reset}]
+    echo "    Expected response: 1"
+    echo "    Actual response: $result"
+else
+    echo [${Green}TEST OK${Reset}]
+fi
+
